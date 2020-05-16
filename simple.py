@@ -5,8 +5,6 @@ import numpy as np
 from collections import deque
 import tensorflow as tf
 
-EPISODES = 100
-
 class DQNAgent:
     def __init__(self, state_size, action_size):
         self.state_size = state_size
@@ -24,6 +22,7 @@ class DQNAgent:
         x = tf.keras.layers.Dense(128, kernel_initializer='lecun_normal', activation='selu')(x)
         x = tf.keras.layers.Dense(128, kernel_initializer='lecun_normal', activation='selu')(x)
         x = tf.keras.layers.Dense(128, kernel_initializer='lecun_normal', activation='selu')(x)
+        x = tf.keras.layers.GaussianDropout(0.1)(x)
         x = tf.keras.layers.Dense(self.action_size, activation='linear')(x)
 
         model = tf.keras.Model(inputs=inpx, outputs=x)
@@ -34,22 +33,44 @@ class DQNAgent:
         self.memory.append((state, action, reward, next_state, done))
 
     def act(self, state, training=True):
-        if training and np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)
+        # if training and np.random.rand() <= self.epsilon:
+            # return random.randrange(self.action_size)
         act_values = self.model(state, training=training)
         return np.argmax(act_values[0]) # returns action
 
     def replay(self, batch_size):
         minibatch = random.sample(self.memory, batch_size)
+        states = []
+        next_states = []
         for state, action, reward, next_state, done in minibatch:
+            states.append(state[0])
+            next_states.append(next_state[0])
+        states = np.array(states)
+        next_states = np.array(next_states)
+
+        predState = np.array(self.model(states, training=False))
+        predNextState = np.array(self.model(next_states, training=False))
+        # minibatch = random.sample(self.memory, batch_size)
+        targets = []
+        for i in range(len(minibatch)):
+        # for state, action, reward, next_state, done in minibatch:
+            state, action, reward, next_state, done = minibatch[i]
             target = reward
+            nextSample = predNextState[i]
+            Qmax = np.amax(nextSample)
+            target_f = predState[i]
             if not done:
-                target = (reward + self.gamma*np.amax(self.model(next_state)[0]))
-            target_f = np.array(self.model(state))
-            target_f[0][action] = target
-            self.model.fit(state, target_f, epochs=1, verbose=0)
+                target = (reward + self.gamma*Qmax)
+            target_f[action] = target
+            targets.append(target_f)
+
+        targets = np.array(targets)
         # if self.epsilon > self.epsilon_min:
             # self.epsilon *= self.epsilon_decay
+        history = self.model.fit(states, targets, batch_size=batch_size, epochs=1, verbose=0)
+        # if self.epsilon > self.epsilon_min:
+            # self.epsilon *= self.epsilon_decay
+        return history.history['loss'][0]
 
     def load(self, name):
         self.model.load_weights(name)
@@ -59,6 +80,7 @@ class DQNAgent:
 
 
 env_name = 'LunarLander-v2'
+EPISODES = 1000
 
 if __name__ == "__main__":
     env = gym.make(env_name)
@@ -69,10 +91,10 @@ if __name__ == "__main__":
     agent.load(f"./model-{env_name}.h5")
 
     done = False
-    batch_size = 256
+    batch_size = 128
 
-    train=False
-    # train=True
+    # train=False
+    train=True
     if train:
         for e in range(EPISODES):
             state = env.reset()
@@ -88,10 +110,10 @@ if __name__ == "__main__":
                 cumReward += reward
                 state = next_state
                 if done:
-                    print("episode: {}/{}, steps: {}, e: {:.2}, reward: {}".format(e, EPISODES, time, agent.epsilon, cumReward))
                     break
             if len(agent.memory) > batch_size:
-                agent.replay(batch_size)
+                loss = agent.replay(batch_size)
+                print(f"episode: {e: 4d}/{EPISODES:4d}, steps: {time: 4d}, reward: {cumReward:+7.2f}, loss = {loss:.2f}")
         agent.save(f"./model-{env_name}.h5")
     else:
         env = gym.wrappers.Monitor(env, './videos/dqn-' + str(time.time()) + '/')

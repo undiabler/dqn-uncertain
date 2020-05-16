@@ -6,6 +6,8 @@ from collections import deque
 import tensorflow as tf
 import tensorflow_probability as tfp
 
+from scipy.stats import norm
+
 EPISODES = 1000
 
 # @tf.function
@@ -36,7 +38,6 @@ class DQNUncertainAgent:
         x = tf.keras.layers.Dense(128, kernel_initializer='lecun_normal', activation='selu')(x)
         # x = tf.keras.layers.Dense(self.action_size, activation='linear')(x)
         x = tf.keras.layers.GaussianDropout(0.1)(x)
-
 
         eluplus = lambda x: tf.nn.elu(x)+1
 
@@ -93,8 +94,45 @@ class DQNUncertainAgent:
             print(samples)
         return np.argmax(samples)
 
+    def experience(self, batch_size=128):
+        states = []
+        actions = []
+        rewards = []
+        for state, action, reward, next_state, done in self.memory:
+            states.append(state[0])
+            actions.append(action)
+            rewards.append(reward)
+        states = np.array(states)
+
+        predDist = np.array(self.model(states, training=False))
+        # print("Q predict:",act_values)
+
+        policyvals = []
+        for i in range(len(states)):
+            Qsample = predDist[i][actions[i]]
+            # policy = norm.pdf(rewards[i], Qsample[0], Qsample[1])
+            policy = 1-norm.cdf(rewards[i], Qsample[0], Qsample[1])
+            policyvals.append((policy,i))
+        
+        policyvals = np.array(policyvals)
+
+        # print("policy:", policyvals)
+        print("policy-max:", np.max(policyvals[:,0]))
+        print("policy-min:", np.min(policyvals[:,0]))
+        print("policy-mean:", np.mean(policyvals[:,0]))
+
+        topworst = policyvals[policyvals[:,0].argsort()][:batch_size]
+        # print("worstids:", topworst[:,1])
+        # print("worst:", topworst[:,0])
+        # print("Y:", targets.shape)
+        # history = self.model.fit(states, targets, batch_size=batch_size, epochs=1, verbose=0)
+        # if self.epsilon > self.epsilon_min:
+            # self.epsilon *= self.epsilon_decay
+        return [self.memory[int(i)] for i in topworst[:,1]]
+
     def replay(self, batch_size):
-        minibatch = random.sample(self.memory, batch_size)
+        # minibatch = random.sample(self.memory, batch_size)
+        minibatch = self.experience(batch_size)
         states = []
         next_states = []
         for state, action, reward, next_state, done in minibatch:
@@ -145,18 +183,21 @@ if __name__ == "__main__":
 
     action_size = env.action_space.n
     agent = DQNUncertainAgent(state_size, action_size)
-    # agent.load(f"./model-{env_name}-un2.h5")
+    agent.load(f"./model-{env_name}-un2.h5")
 
     done = False
     batch_size = 128
 
-    # train=False
-    train=True
+    train=False
+    # train=True
     if train:
         for e in range(EPISODES):
             state = env.reset()
             state = np.reshape(state, [1, state_size])
             cumReward = 0
+            # if e==10:
+                # agent.experience()
+                # break
             for time in range(5000):
                 # env.render()
                 action = agent.act(state)
