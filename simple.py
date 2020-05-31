@@ -5,11 +5,16 @@ import numpy as np
 from collections import deque
 import tensorflow as tf
 
+from memory import ReplayBuffer
+
 class QAgent:
     def __init__(self, state_size, action_size):
         self.state_size = state_size
         self.action_size = action_size
-        self.memory = deque(maxlen=2000)
+
+        # self.memory = deque(maxlen=2000)
+        self.memory = ReplayBuffer(input_shape=(state_size,))
+
         self.gamma = 0.95   # discount rate
         self.epsilon = 0.2  # exploration rate
         self.learning_rate = 1e-5
@@ -46,13 +51,19 @@ class QAgent:
         #   https://towardsdatascience.com/dueling-deep-q-networks-81ffab672751
 
         actions = deepDueling(x)
-        actions = tf.keras.layers.Dense(self.action_size, activation='softmax')(actions)
+        # actions = tf.keras.layers.Dense(self.action_size, activation='softmax')(actions)
+        actions = tf.keras.layers.Dense(self.action_size)(actions)
         
         value = deepDueling(x)
         value = tf.keras.layers.Dense(1, activation='linear')(value)
 
         # dueling X
-        x = tf.keras.layers.Flatten()(actions*value)
+        # x = tf.keras.layers.Flatten()(actions*value)
+
+        # Combine streams into Q-Values, custom layer for reduce mean
+        reduce_mean = tf.keras.layers.Lambda(lambda w: tf.reduce_mean(w, axis=1, keepdims=True))
+
+        x = tf.keras.layers.Add()([value, tf.keras.layers.Subtract()([actions, reduce_mean(actions)])])
 
         # Compiled model, using Huber loss
         model = tf.keras.Model(inputs=inpx, outputs=x)
@@ -61,7 +72,8 @@ class QAgent:
         return model
 
     def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
+        # self.memory.append((state, action, reward, next_state, done))
+        self.memory.add_experience(state[0], action, reward, done, next_state[0])
 
     def update_model(self):
         # Update the target Q network
@@ -77,44 +89,79 @@ class QAgent:
         return np.argmax(act_values[0]) # returns action
 
     def replay(self, batch_size):
-        minibatch = random.sample(self.memory, batch_size)
-        states = []
-        next_states = []
-        for state, action, reward, next_state, done in minibatch:
-            states.append(state[0])
-            next_states.append(next_state[0])
-        states = np.array(states)
-        next_states = np.array(next_states)
+        # minibatch = random.sample(self.memory, batch_size)
+        # states = []
+        # next_states = []
+        # for state, action, reward, next_state, done in minibatch:
+        #     states.append(state[0])
+        #     next_states.append(next_state[0])
+        # states = np.array(states)
+        # next_states = np.array(next_states)
+
+        minibatch, prior, indx = self.memory.get_minibatch()
+        states, actions, rewards, next_states, dones = minibatch
 
         predState = np.array(self.model(states, training=False))
         predNextState = np.array(self.oldmodel(next_states, training=False))
-        # minibatch = random.sample(self.memory, batch_size)
+        
         targets = []
-        for i in range(len(minibatch)):
+        for i in range(len(indx)):
+        # for i in range(len(minibatch)):
         # for state, action, reward, next_state, done in minibatch:
-            state, action, reward, next_state, done = minibatch[i]
-            target = reward
-            nextSample = predNextState[i]
-            Qmax = np.amax(nextSample)
-            target_f = predState[i]
-            if not done:
-                target = (reward + self.gamma*Qmax)
-            target_f[action] = target
-            targets.append(target_f)
+            # state, action, reward, next_state, done = minibatch[i]
+            state, _, reward, next_state, done = states[i], actions[i], rewards[i], next_states[i], dones[i]
+            # print(state)
+            action = np.argmax(predState[i])
+    
+            Qmax = predNextState[i][action]
+            # Qmax = np.amax(predNextState[i])
+            # target_f = predState[i]
+
+            target = reward + self.gamma*Qmax*(1-done)
+            # target_f[action] = target
+            # targets.append(target_f)
+            targets.append(target)
 
         targets = np.array(targets)
+        # print(states.shape)
+        # print(targets.shape)
         # if self.epsilon > self.epsilon_min:
             # self.epsilon *= self.epsilon_decay
-        history = self.model.fit(states, targets, batch_size=batch_size, epochs=1, verbose=0)
+
+        # history = self.model.fit(states, targets, batch_size=batch_size, epochs=1, verbose=0)
+        # loss = history.history['loss'][0]
+
+        # Use targets to calculate loss (and use loss to calculate gradients)
+        with tf.GradientTape() as tape:
+            q_values = self.model(states)
+
+            one_hot_actions = tf.keras.utils.to_categorical(actions, self.action_size, dtype=np.float32)  # using tf.one_hot causes strange errors
+            Q = tf.reduce_sum(tf.multiply(q_values, one_hot_actions), axis=1)
+            # print(q_values)
+            # print(Q)
+            error = Q - targets
+            loss = tf.keras.losses.Huber()(targets, Q)
+
+            # if self.use_per:
+                # Multiply the loss by importance, so that the gradient is also scaled.
+                # The importance scale reduces bias against situataions that are sampled
+                # more frequently.
+                # loss = tf.reduce_mean(loss * importance)
+
+        model_gradients = tape.gradient(loss, self.model.trainable_variables)
+        self.model.optimizer.apply_gradients(zip(model_gradients, self.model.trainable_variables))
+
         # if self.epsilon > self.epsilon_min:
             # self.epsilon *= self.epsilon_decay
         # Target network 
+        # print(indx,error.numpy())
+        self.memory.set_priorities(indx, error.numpy())
         self.activeReplays +=1
         if self.activeReplays>self.updateReplays:
             self.update_model()
             self.activeReplays = 0
 
-        return history.history['loss'][0]
+        return loss
 
     def load(self, name):
         self.model.load_weights(name)
@@ -125,7 +172,7 @@ class QAgent:
 
 
 env_name = 'LunarLander-v2'
-EPISODES = 1000
+EPISODES = 100
 
 if __name__ == "__main__":
     env = gym.make(env_name)
@@ -133,7 +180,7 @@ if __name__ == "__main__":
     # print(env.action_space.sample())
     action_size = 4
     agent = QAgent(state_size, action_size)
-    agent.load(f"./model-{env_name}.h5")
+    # agent.load(f"./model-{env_name}.h5")
 
     done = False
     batch_size = 128
@@ -161,6 +208,7 @@ if __name__ == "__main__":
                 print(f"episode: {e: 4d}/{EPISODES:4d}, steps: {time: 4d}, reward: {cumReward:+7.2f}, loss = {loss:.2f}")
         agent.save(f"./model-{env_name}.h5")
     else:
+        agent.load(f"./model-{env_name}.h5")
         # env = gym.wrappers.Monitor(env, './videos/dqn-' + str(time.time()) + '/')
         state = env.reset()
         state = np.reshape(state, [1, state_size])
