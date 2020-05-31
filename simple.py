@@ -14,6 +14,10 @@ class QAgent:
         self.epsilon = 0.2  # exploration rate
         self.learning_rate = 1e-5
         self.model = self._build_model()
+        self.oldmodel = self._build_model()
+
+        self.activeReplays = 0
+        self.updateReplays = 10
 
     def _build_model(self):
 
@@ -59,6 +63,11 @@ class QAgent:
     def remember(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
 
+    def update_model(self):
+        # Update the target Q network
+        self.oldmodel.set_weights(self.model.get_weights())
+        print("model updated")
+
     def act(self, state, training=True):
         # if training and np.random.rand() <= self.epsilon:
             # return random.randrange(self.action_size)
@@ -78,7 +87,7 @@ class QAgent:
         next_states = np.array(next_states)
 
         predState = np.array(self.model(states, training=False))
-        predNextState = np.array(self.model(next_states, training=False))
+        predNextState = np.array(self.oldmodel(next_states, training=False))
         # minibatch = random.sample(self.memory, batch_size)
         targets = []
         for i in range(len(minibatch)):
@@ -99,17 +108,24 @@ class QAgent:
         history = self.model.fit(states, targets, batch_size=batch_size, epochs=1, verbose=0)
         # if self.epsilon > self.epsilon_min:
             # self.epsilon *= self.epsilon_decay
+        # Target network 
+        self.activeReplays +=1
+        if self.activeReplays>self.updateReplays:
+            self.update_model()
+            self.activeReplays = 0
+
         return history.history['loss'][0]
 
     def load(self, name):
         self.model.load_weights(name)
+        self.update_model()
 
     def save(self, name):
         self.model.save_weights(name)
 
 
 env_name = 'LunarLander-v2'
-EPISODES = 100
+EPISODES = 1000
 
 if __name__ == "__main__":
     env = gym.make(env_name)
